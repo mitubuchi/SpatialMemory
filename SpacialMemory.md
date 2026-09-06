@@ -80,10 +80,10 @@
 
 | コンポーネント | 役割 | 実装 |
 |---|---|---|
-| **アドレスメモリー** | ビット並列比較・マッチング | CAMセル（XNOR + AND）アレイ |
+| **アドレスメモリー** | ビット並列比較・マッチング | CAMセル（XNOR + マスクOR）アレイ |
 | **マスクレジスタ** | 検索範囲の制御 | LSBシフトレジスタ |
 | **書き込みカウンター** | 新規エントリ管理 | バイナリカウンター（WR_PTR） |
-| **ANDゲートツリー** | 並列メモリーの全一致判定 | ANDリダクションツリー |
+| **ANDゲートツリー** | 同一行が全次元で一致したかの判定 | 行ごとのANDリダクション |
 | **データメモリー** | データの格納と出力 | SRAMマクロ（直列拡張可） |
 
 ---
@@ -92,26 +92,32 @@
 
 ### CAMセルの論理構成 / CAM Cell Logic
 
-1ビット分のCAMセルは **XNOR ゲート** と **AND ゲート（マスク適用）** の2段構成です。
+1ビット分のCAMセルは **XNOR ゲート** と **OR ゲート（マスク適用）** の2段構成です。
 
 ```
 stored_bit ──┐
              ├─[XNOR]─── match_bit ──┐
-input_bit  ──┘                       ├─[AND]─── masked_match
+input_bit  ──┘                       ├─[OR]─── masked_match
                                      │
-mask_bit   ──────────────────────────┘
+mask_bit ──[NOT]── ~mask_bit ────────┘
 ```
 
 #### 論理式 / Boolean Expressions
 
 ```
 match_bit    = ~(stored_bit XOR input_bit)   // XNOR: 一致で1
-masked_match =  match_bit AND mask_bit       // マスクが0なら強制一致
+masked_match =  match_bit OR (NOT mask_bit)  // マスクが0なら強制一致
 row_match    =  AND(masked_match[0..N-1])    // 全ビットANDで行一致判定
 ```
 
 > `mask_bit = 0` のビットは比較をスキップ（必ず一致扱い）します。  
 > When `mask_bit = 0`, that bit is skipped (always treated as matching).
+
+> ⚠️ マスクの適用は **AND ではなく OR（`~mask_bit` との OR）** です。  
+> `match_bit AND mask_bit` にすると、マスクした（無視したい）ビットが不一致になり、  
+> 行ANDで必ず落ちます。RTL 実装（9章 `cam_cell`）も `xnor_out | ~mask_bit` です。  
+> Masking is an **OR with `~mask_bit`, not an AND**: an AND would force masked-out bits  
+> to mismatch and kill `row_match`.
 
 ### 動作フロー / Operation Flow
 
@@ -219,11 +225,21 @@ WR_PTR: N-bit binary counter
 
 ### 並列接続の全一致条件 / All-Match Condition
 
-複数のCAMアレイを並列接続した場合、**すべてのアレイが同時にHITを出力したときのみ** データが出力されます。
+複数のCAMアレイを並列接続した場合、**同一エントリ（同じ行）がすべてのアレイで一致したときのみ** データが出力されます。
+
+ANDは「アレイごとのHITフラグ」ではなく、**行ごとのマッチベクトル同士**で取ります。
 
 ```
-HIT = match_flag[0] AND match_flag[1] AND ... AND match_flag[N-1]
+row_hit[i] = match[0][i] AND match[1][i] AND ... AND match[N-1][i]   // i = 0 .. NUM_ENTRIES-1
+HIT        = OR(row_hit[0 .. NUM_ENTRIES-1])                        // 1行でも残ればHIT
+hit_index  = row_hit が立っている行                                  // データメモリーのアドレス
 ```
+
+> ⚠️ フラグ同士の AND（`match_flag[0] AND match_flag[1] AND ...`）にしてはいけません。  
+> アレイ#1が3行目、アレイ#2が7行目で一致しただけでHITになってしまい、  
+> **同じエントリで一致したことを保証できず、`hit_index` も一意に決まりません。**  
+> ANDing per-array HIT flags would assert HIT even when the arrays matched *different*  
+> rows, so the AND must be taken per row.
 
 ### 多次元連想検索の例 / Multi-Dimensional Search Example
 
@@ -238,15 +254,20 @@ CAMアレイ #3 : 位置情報（32bit 座標）
 
 ### 出力条件テーブル / Output Condition Table
 
-| CAM #1 | CAM #2 | CAM #3 | 出力 / Output |
-|--------|--------|--------|---------------|
-| HIT    | HIT    | HIT    | ✅ データ出力 |
-| HIT    | Miss   | HIT    | ❌ NotFind   |
-| Miss   | HIT    | HIT    | ❌ NotFind   |
-| Miss   | Miss   | Miss   | ❌ NotFind   |
+判定はすべて **同じ行 i について** 行います。
 
-> 1つでも Miss があれば NotFind になります。  
-> A single Miss in any dimension results in NotFind.
+| CAM #1 の行 i | CAM #2 の行 i | CAM #3 の行 i | 出力 / Output |
+|--------|--------|--------|---------------|
+| 一致   | 一致   | 一致   | ✅ データ出力（hit_index = i） |
+| 一致   | 不一致 | 一致   | ❌ その行は落ちる |
+| 不一致 | 一致   | 一致   | ❌ その行は落ちる |
+| 不一致 | 不一致 | 不一致 | ❌ その行は落ちる |
+
+> 1つの次元でも不一致なら、その行は候補から外れます。全行が落ちれば NotFind です。  
+> A single mismatch in any dimension drops that row; if all rows drop, the result is NotFind.
+
+> アレイごとに一致した行が違う場合（#1は行3だけ一致、#2は行7だけ一致）は、  
+> どの行 i を見ても全次元一致にならないため **NotFind** です。
 
 ---
 
@@ -373,9 +394,9 @@ LSBマスクシフトにより、**ビット差が最小のエントリから順
 top_spatial_memory.v              ← トップレベル統合
 ├── cam_array.v                   ← CAMアレイ（N行×Mbit）
 │   └── cam_row.v                 ← 1行分のCAMセル群
-│       └── cam_cell.v            ← 1ビット比較器（XNOR+AND）
+│       └── cam_cell.v            ← 1ビット比較器（XNOR + マスクOR）
 ├── mask_register.v               ← LSBシフトマスクレジスタ
-├── and_reduction_tree.v          ← ANDリダクションツリー
+├── and_reduction_tree.v          ← 行ごとの全次元AND（行マッチベクトルのAND）
 ├── wr_pointer.v                  ← 書き込みカウンター（WR_PTR）
 ├── output_ctrl.v                 ← 出力制御ロジック（HIT/NotFind判定）
 └── data_sram_wrapper.v           ← SRAMマクロ ラッパー（直列接続対応）
@@ -387,7 +408,7 @@ top_spatial_memory.v              ← トップレベル統合
 module cam_cell (
   input  wire clk,
   input  wire rst_n,
-  input  wire we,           // 書き込みイネーブル
+  input  wire we,           // 書き込みイネーブル（行選択済み）
   input  wire input_bit,    // 入力アドレスビット
   input  wire mask_bit,     // マスクビット（0=スキップ）
   output wire match         // 一致フラグ
@@ -412,16 +433,23 @@ endmodule
 
 ```verilog
 module cam_row #(
-  parameter BIT_WIDTH = 32
+  parameter BIT_WIDTH  = 32,
+  parameter ENTRY_BITS = 8,
+  parameter ROW_INDEX  = 0    // この行のインデックス（cam_array が generate で与える）
 )(
   input  wire                  clk,
   input  wire                  rst_n,
-  input  wire                  we,
+  input  wire                  we,          // アレイ共通の書き込みイネーブル
+  input  wire [ENTRY_BITS-1:0] wr_ptr,      // 書き込み先の行（WR_PTR）
   input  wire [BIT_WIDTH-1:0]  input_addr,
   input  wire [BIT_WIDTH-1:0]  mask,
   output wire                  row_match
 );
   wire [BIT_WIDTH-1:0] cell_match;
+
+  // 行選択：WR_PTR が自分の行を指しているときだけ書き込む。
+  // これが無いと we で全行が同じアドレスに書き換わる。
+  wire we_row = we & (wr_ptr == ROW_INDEX);
 
   genvar i;
   generate
@@ -429,7 +457,7 @@ module cam_row #(
       cam_cell u_cell (
         .clk       (clk),
         .rst_n     (rst_n),
-        .we        (we),
+        .we        (we_row),
         .input_bit (input_addr[i]),
         .mask_bit  (mask[i]),
         .match     (cell_match[i])
@@ -443,17 +471,45 @@ module cam_row #(
 endmodule
 ```
 
+`cam_array` は各行を generate で並べ、`ROW_INDEX` に行番号を与えつつ
+`we` と `wr_ptr` を全行へブロードキャストします。書き込みが当たるのは
+`wr_ptr` が指す1行だけです。
+
+```verilog
+  for (r = 0; r < NUM_ENTRIES; r = r+1) begin : ROW
+    cam_row #(.BIT_WIDTH(BIT_WIDTH), .ENTRY_BITS(ENTRY_BITS), .ROW_INDEX(r)) u_row (
+      .clk(clk), .rst_n(rst_n), .we(we), .wr_ptr(wr_ptr),
+      .input_addr(input_addr), .mask(mask), .row_match(match_vec[r])
+    );
+  end
+```
+
 ### ANDリダクションツリー / AND Reduction Tree
 
 ```verilog
 module and_reduction_tree #(
-  parameter NUM_ARRAYS = 4   // 並列CAMアレイ数
+  parameter NUM_ARRAYS  = 4,    // 並列CAMアレイ数（次元数）
+  parameter NUM_ENTRIES = 256   // エントリ数（行数）
 )(
-  input  wire [NUM_ARRAYS-1:0] match_flags,  // 各アレイのHITフラグ
-  output wire                  global_hit,   // 全一致フラグ
-  output wire                  not_find      // 未発見フラグ
+  // 各アレイの行マッチベクトルを連結したもの（アレイ a の行 i = match_vec[a*NUM_ENTRIES + i]）
+  input  wire [NUM_ARRAYS*NUM_ENTRIES-1:0] match_vec,
+  output wire [NUM_ENTRIES-1:0]            row_hit,     // 全次元で一致した行
+  output wire                              global_hit,  // 1行でも残ればHIT
+  output wire                              not_find     // 未発見フラグ
 );
-  assign global_hit = &match_flags;
+  genvar i, a;
+  generate
+    for (i = 0; i < NUM_ENTRIES; i = i+1) begin : ROW
+      wire [NUM_ARRAYS-1:0] dim_match;
+      for (a = 0; a < NUM_ARRAYS; a = a+1) begin : ARR
+        assign dim_match[a] = match_vec[a*NUM_ENTRIES + i];
+      end
+      // 同じ行が全次元で一致したときだけ 1（フラグ同士のANDではない）
+      assign row_hit[i] = &dim_match;
+    end
+  endgenerate
+
+  assign global_hit = |row_hit;
   assign not_find   = ~global_hit;
 endmodule
 ```
@@ -674,5 +730,5 @@ This document is internal technical material. External disclosure requires separ
 
 ---
 
-*最終更新 / Last updated: 2026-04-28*  
+*最終更新 / Last updated: 2026-09-06*  
 *作成 / Author: 空間メモリー設計チーム / Spatial Memory Design Team*
