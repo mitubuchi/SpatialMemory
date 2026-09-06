@@ -141,22 +141,47 @@ row_match    =  AND(masked_match[0..N-1])    // 全ビットANDで行一致判�
 ### 書き込みカウンター / Write Pointer
 
 ```
-WR_PTR : N-bit バイナリカウンター
+WR_PTR : (ENTRY_BITS + 1) bit バイナリカウンター（下位 ENTRY_BITS bit が次に書く行）
 - 新規エントリ書き込み時にインクリメント
 - Reset 信号でゼロクリア
-- FULL フラグ：WR_PTR が最終エントリに達したとき
+- FULL フラグ：全エントリを書き終えたとき（カウンターの最上位ビット）
+- FULL の間は inc を無視する。wrap して entry 0 を壊さない
+- FULL 中の新規登録要求は拒否し、NotFind + FULL を返す
 
-WR_PTR: N-bit binary counter
+WR_PTR: (ENTRY_BITS + 1)-bit binary counter (low ENTRY_BITS bits = next row to write)
 - Increments on each new-entry write
 - Zero-cleared by Reset signal
-- FULL flag: asserted when WR_PTR reaches last entry
+- FULL flag: asserted once every entry has been written (counter MSB)
+- While FULL, inc is ignored — the pointer never wraps onto entry 0
+- A new-entry write while FULL is rejected: NotFind + FULL
 ```
+
+> 行アドレスと同じ幅のカウンターにすると、最後の行を書いた瞬間に 0 へ戻り、
+> 「空」と「満杯」を区別できません。1 bit 広く取るのはそのためです。  
+> A counter as wide as the row address wraps to 0 right after the last row is written,
+> making "empty" and "full" indistinguishable — hence the extra bit.
 
 ---
 
 ## 4. データメモリー / Data Memory
 
 ### 読み書きルール / Read/Write Rules
+
+#### 共通規則：Write の判定は常に完全一致 / Writes always compare with the full mask
+
+```
+Write 操作のとき、CAM に与えるマスクは マスクレジスタの値に関係なく 全ビット 1 とする
+  mask_eff = write ? 全1 : mask_reg
+```
+
+近傍検索（6章）でマスクを広げた直後に Write すると、レジスタに残った
+マスクで「近い別のエントリ」が HIT になり、**そのエントリを上書きしてしまいます。**
+Write の HIT / NotFind は、必ず完全一致で判定します。マスクレジスタ自体は
+触らないので、進行中の近傍検索の状態は壊れません（9章 `mask_register` の項）。
+
+> A write issued right after a widened neighbor search would otherwise hit — and
+> overwrite — a *nearby* entry. Writes therefore always search with an all-ones mask,
+> applied combinationally so the mask register (and any search in progress) is untouched.
 
 #### パターン 1：Read + HIT
 
@@ -171,22 +196,24 @@ WR_PTR: N-bit binary counter
 #### パターン 2：Write + HIT（上書き）
 
 ```
-条件 / Condition : CAM が HIT を出力、かつ Write 操作
+条件 / Condition : CAM が HIT を出力（完全一致。共通規則）、かつ Write 操作
 動作 / Behavior  :
   1. hit_index を RAM のアドレスとして使用
   2. RAM[hit_index] ← 新しいデータ（上書き）
   3. アドレスメモリーは変更なし
   4. WR_PTR は変化しない
+  ※ FULL でも上書きは可能（新しい行を使わないため）
 ```
 
 #### パターン 3：Write + NotFind（新規登録）
 
 ```
-条件 / Condition : CAM が NotFind を出力、かつ Write 操作
+条件 / Condition : CAM が NotFind を出力（完全一致。共通規則）、かつ Write 操作
 動作 / Behavior  :
+  0. FULL なら何もしない。NotFind + FULL フラグを返して終了
   1. CAM[WR_PTR]  ← 入力アドレス（アドレスメモリーへ登録）
   2. RAM[WR_PTR]  ← 入力データ（データメモリーへ登録）
-  3. WR_PTR       ← WR_PTR + 1（ポインターを進める）
+  3. WR_PTR       ← WR_PTR + 1（ポインターを進める。最後の行を書くと FULL が立つ）
 ```
 
 #### パターン 4：Read + NotFind
@@ -673,6 +700,15 @@ module mask_register #(
 endmodule
 ```
 
+CAM アレイに実際に渡すマスクは、Write のときだけ組み合わせ回路で全 1 に差し替えます
+（4章「共通規則」）。レジスタは書き換えないので、近傍検索の途中で Write が
+割り込んでも検索の状態は保たれます。
+
+```verilog
+  // top_spatial_memory 内
+  wire [BIT_WIDTH-1:0] mask_eff = write ? {BIT_WIDTH{1'b1}} : mask;   // Write は常に完全一致
+```
+
 ### 書き込みポインター / Write Pointer
 
 ```verilog
@@ -681,20 +717,29 @@ module wr_pointer #(
 )(
   input  wire                  clk,
   input  wire                  rst_n,
-  input  wire                  inc,      // インクリメント
-  output reg  [ENTRY_BITS-1:0] wr_ptr,
-  output wire                  full      // メモリーフル
+  input  wire                  inc,      // 新規登録（Write + NotFind）で 1
+  output wire [ENTRY_BITS-1:0] wr_ptr,   // 次に書く行
+  output wire [ENTRY_BITS:0]   count,    // 登録済みエントリ数（0 .. 2^ENTRY_BITS）
+  output wire                  full      // 全行使用済み。以後の inc は無視する
 );
-  reg [ENTRY_BITS-1:0] max_ptr;
+  // 行アドレスより 1 bit 広いカウンター。最上位ビットが立てば全行を書き終えている。
+  // ENTRY_BITS 幅のままだと最後の行を書いた瞬間に 0 へ戻り、空と満杯を区別できない。
+  reg [ENTRY_BITS:0] cnt;
 
   always @(posedge clk or negedge rst_n) begin
-    if (!rst_n)    wr_ptr <= 0;
-    else if (inc)  wr_ptr <= wr_ptr + 1;
+    if (!rst_n)            cnt <= {(ENTRY_BITS+1){1'b0}};
+    else if (inc && !full) cnt <= cnt + 1'b1;   // full で止める。wrap して entry 0 を壊さない
   end
 
-  assign full = (wr_ptr == {ENTRY_BITS{1'b1}});
+  assign count  = cnt;
+  assign wr_ptr = cnt[ENTRY_BITS-1:0];
+  assign full   = cnt[ENTRY_BITS];
 endmodule
 ```
+
+`inc` は上位ロジック（`output_ctrl`）が「Write かつ完全一致 NotFind」のときだけ立てます。
+FULL 中は `inc` が来ても止まるので、`output_ctrl` 側は FULL を見て
+新規登録を拒否し、NotFind + FULL を返します（4章 パターン 3）。
 
 ### タイミング仕様 / Timing Specification
 
@@ -818,8 +863,9 @@ public class SpatialMemory<TData>
     // Read: アドレスで検索してデータを返す（近傍検索対応）
     public SearchResult<TData> Read(ulong address, int maxMaskShift = 0);
 
-    // Write: アドレスが存在すれば上書き、なければ新規登録
-    public void Write(ulong address, TData data);
+    // Write: 完全一致で判定し、存在すれば上書き、なければ新規登録。
+    // 満杯（IsFull）で新規登録が必要なときは何もせず false を返す
+    public bool Write(ulong address, TData data);
 
     // 近傍検索: LSBシフトしながら、共有プレフィックスが最も長いエントリを探す
     // （プレフィックス近傍。境界問題の対処 A を含む。6章を参照）
