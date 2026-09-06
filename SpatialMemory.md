@@ -664,35 +664,27 @@ endmodule
 `row_hit` から `hit_index` を作ります。複数行が立っているときは **最小インデックス**
 （最も古いエントリ）を採り、`multi_hit` を立てます（6章「多重ヒットの規則」）。
 
-```verilog
-module priority_encoder #(
-  parameter NUM_ENTRIES = 256,
-  parameter ENTRY_BITS  = 8,
-  parameter NEWEST_WINS = 0     // 1 にすると最大インデックス（最も新しいエントリ）を採る
-)(
-  input  wire [NUM_ENTRIES-1:0] row_hit,
-  output reg  [ENTRY_BITS-1:0]  hit_index,
-  output wire                   multi_hit    // 2 行以上一致
-);
-  integer i;
-  always @* begin
-    hit_index = {ENTRY_BITS{1'b0}};
-    if (NEWEST_WINS) begin
-      for (i = 0; i < NUM_ENTRIES; i = i+1)        // 上から上書きして最大インデックスが残る
-        if (row_hit[i]) hit_index = i[ENTRY_BITS-1:0];
-    end else begin
-      for (i = NUM_ENTRIES-1; i >= 0; i = i-1)     // 下から上書きして最小インデックスが残る
-        if (row_hit[i]) hit_index = i[ENTRY_BITS-1:0];
-    end
-  end
+**2 分木で畳みます（`log2(NUM_ENTRIES)` 段）。** for ループの直列記述は動作としては同じですが、
+合成後の論理段数がエントリ数に比例して伸び、64 エントリで 20 段になりました。
+木にすると 64 エントリで 6 段、256 で 8 段、1024 で 10 段に収まります。
 
-  // 最下位の 1 を消して、まだ 1 が残っていれば多重ヒット
-  assign multi_hit = |(row_hit & (row_hit - 1'b1));
-endmodule
+各ノードは `(any, idx, multi)` を持ち、レベル l のノード n は 1 つ下のノード 2n（左 = 小さい
+インデックス）と 2n+1（右）を併合します。
+
+```verilog
+// 併合の 1 段（rtl/priority_encoder.v の MERGE ブロック）
+wire take_r = NEWEST_WINS ? any_r : ~any_l;                 // 右を採るか
+wire [ENTRY_BITS-1:0] idx_r_tagged = idx_r | (1 << (l-1));  // 右ならこの段のビットを 1 に
+assign any_out   = any_l | any_r;
+assign multi_out = multi_l | multi_r | (any_l & any_r);     // 両側に有れば多重
+assign idx_out   = take_r ? idx_r_tagged : idx_l;
 ```
 
-上のループ記述は動作定義用です。エントリ数が大きいときは、合成時にツリー構造の
-エンコーダー（log2 段）へ置き換えて遅延を抑えます。
+- `NEWEST_WINS = 1` で最大インデックス（最も新しいエントリ）に切り替わります
+- `multi_hit` も木の中で求めるので、`row_hit & (row_hit - 1)` のような
+  エントリ数に比例する桁上げ連鎖は使いません
+
+全文は [rtl/priority_encoder.v](rtl/priority_encoder.v) にあります。
 
 ### マスクレジスタ / Mask Register
 
@@ -825,6 +817,33 @@ Step 6: テープアウト
         ├── ファンダリ提出（TSMC / GlobalFoundries等）
         └── シリコン評価・特性測定
 ```
+
+### FPGA 合成の実測 / FPGA Synthesis Results
+
+`synth/run_synth.py`（yosys `synth_xilinx`、7 シリーズ、平坦化）で `rtl/` を合成した値です。
+2026-09-07、DATA_WIDTH = 64。配置配線は行っていないので、段数は目安です。
+
+| 構成（bit × エントリ × 次元） | CAM bit | LUT | FF | BRAM | 最長経路（段） | LUT / CAM bit |
+|---|---|---|---|---|---|---|
+| 16 × 64 × 1 | 1,024 | 1,416 | 1,176 | 0（分散RAM 22） | 13 | 1.38 |
+| 32 × 256 × 1 | 8,192 | 13,065 | 8,490 | 1 | 16 | 1.59 |
+| 32 × 256 × 2 | 16,384 | 26,258 | 16,682 | 1 | 16 | 1.60 |
+| 32 × 1024 × 1 | 32,768 | 55,443 | 33,836 | 2 | 17 | 1.69 |
+
+読み方:
+
+- **CAM 1 bit ≈ FF 1 個 + LUT 1.6 個。** FF は記憶ビットそのもの（+ 行ごとの valid）。
+  LUT は XNOR とマスク OR が LUT3 に畳まれた分と、行 AND・行ごとの次元 AND・
+  エンコーダーの木。エントリ数に対してほぼ線形に伸びる
+- **データ SRAM は BRAM に載る**（256 × 64 で RAMB36 1 個）。CAM 側の資源とは競合しない
+- **最長経路は「検索 + SRAM 読み出し」を 1 クロックで通した長さ**（addr → CAM 比較 4 段 →
+  行 AND → エンコーダー 8〜10 段 → SRAM アドレス）。1 段 ≈ 0.5 ns（LUT + 配線）と見て
+  8〜9 ns、Artix-7 で **100 MHz 前後**が目安。500 MHz は ASIC（28 nm）の数字であって FPGA では出ない
+- **Artix-7 での収まり:** XC7A35T（LUT 20,800）に 32 × 256 × 1、XC7A100T（63,400）に
+  32 × 256 × 2、32 × 1024 × 1 は XC7A100T で 87% と窮屈で XC7A200T（134,600）向け
+
+クロックを上げたいときは、エンコーダーの出力（`hit_index`）にレジスタを 1 段入れて
+検索と SRAM 読み出しを分ける。Read が仕様どおりの 2 クロックになり、経路は半分になる。
 
 ### 面積・電力見積もり（参考）/ Area & Power Estimate
 
