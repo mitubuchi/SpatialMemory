@@ -18,6 +18,7 @@ parallel CAM arrays.
 | [sim/run.py](sim/run.py) | Icarus Verilog でテストベンチを回す（CAM セル版と BRAM 版の両方） |
 | [synth/run_synth.py](synth/run_synth.py) | yosys で Xilinx 7 シリーズ向けに合成し、資源量と段数を出す |
 | [docs/history.md](docs/history.md) | 開発の経緯。何を見つけてなぜそう直したか |
+| [docs/hardware-options.md](docs/hardware-options.md) | 実機実験の選択肢。評価ボードの候補と予算、何が載るか |
 | `spatial_memory_proposal.docx` | 技術企画書（ASIC化の提案） |
 | `spatial_memory_tech_design02.pptx` | 詳細技術設計書（スライド版） |
 
