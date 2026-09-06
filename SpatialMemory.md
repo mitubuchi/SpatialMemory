@@ -138,6 +138,16 @@ row_match    =  AND(masked_match[0..N-1])    // 全ビットANDで行一致判�
    The row index where row_match=1 becomes hit_index (lowest index wins on multiple hits; see §6)
 ```
 
+### 有効ビット / Valid Bit
+
+各行は **valid ビット** を持ち、`row_match = valid AND (全ビット一致)` とします。
+リセット直後は全セルが 0 なので、valid が無いとアドレス 0 の検索が未使用の全行に
+HIT します。valid は新規登録（Write + NotFind）で立ち、Reset でしか落ちません
+（エントリの個別削除は本仕様の範囲外です）。
+
+> Each row carries a valid bit; `row_match = valid AND all-bits-match`. Without it, a search
+> for address 0 would hit every unused (all-zero) row right after reset.
+
 ### 書き込みカウンター / Write Pointer
 
 ```
@@ -578,6 +588,14 @@ module cam_row #(
   // これが無いと we で全行が同じアドレスに書き換わる。
   wire we_row = we & (wr_ptr == ROW_INDEX);
 
+  // 有効ビット。リセット直後は全セルが 0 なので、これが無いと
+  // アドレス 0 の検索が未使用の全行に HIT してしまう。
+  reg valid;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n)      valid <= 1'b0;
+    else if (we_row) valid <= 1'b1;
+  end
+
   genvar i;
   generate
     for (i = 0; i < BIT_WIDTH; i = i+1) begin : CELL
@@ -592,8 +610,8 @@ module cam_row #(
     end
   endgenerate
 
-  // 全ビットAND → 行一致
-  assign row_match = &cell_match;
+  // 全ビットAND → 行一致。未使用の行は一致させない
+  assign row_match = valid & (&cell_match);
 
 endmodule
 ```
@@ -745,19 +763,23 @@ FULL 中は `inc` が来ても止まるので、`output_ctrl` 側は FULL を見
 
 ```
 Read（完全一致）:
-  t_search = 1 clock cycle           // CAM検索（組み合わせ論理）
-  t_read   = 1 clock cycle           // SRAM読み出し
+  t_search = 1 clock cycle           // CAM検索 + 行AND + プライオリティエンコード（組み合わせ論理）
+  t_read   = 1 clock cycle           // SRAM読み出し（data_valid と同時に rdata が出る）
   合計 / Total: 2 clock cycles
 
-Write（新規）:
-  t_search = 1 clock cycle           // CAM検索
-  t_write  = 1 clock cycle           // CAM + SRAM 同時書き込み
-  t_inc    = 1 clock cycle           // WR_PTR インクリメント
-  合計 / Total: 3 clock cycles
+Write（新規 / 上書き）:
+  t_search+write = 1 clock cycle     // 検索は組み合わせ論理。同じクロックの立ち上がりで
+                                     // CAM + SRAM 書き込みと WR_PTR インクリメントを行う
+  合計 / Total: 1 clock cycle
 
-近傍検索（Kビット差）:
-  t_neighbor = (K+1) × 2 clock cycles   // K回のマスクシフト + 検索
+近傍検索（K ステップ）:
+  t_neighbor = (K+1) + 1 clock cycles   // 検索 K+1 回（各 1 clock）+ 最後のヒットの SRAM 読み出し 1 回
+                                        // マスクのシフトは検索と同じクロックで進められる
 ```
+
+検索が 1 クロックに収まるかは、CAM の行AND とプライオリティエンコーダーの遅延で決まります。
+エントリ数が多いときはエンコーダーをツリー化するか、検索と SRAM 読み出しの間に
+パイプラインレジスタを 1 段入れます（`rtl/` の実装は上の表のとおり、レジスタ無し）。
 
 ### 設計パラメーター / Design Parameters
 
