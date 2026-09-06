@@ -4,6 +4,8 @@
     python sim/run.py            # 全部
     python sim/run.py basic      # tb_basic だけ
 
+各テストベンチを CAM_IMPL = 0（CAM セル版）と 1（BRAM 版）の両方で回す。
+
 iverilog は PATH か、OSS CAD Suite をユーザー領域に展開した場所から探す。
 各テストベンチは最後に "ALL TESTS PASSED" を出す。出なければ失敗。
 """
@@ -16,6 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 RTL = ROOT / "rtl"
 TB = ROOT / "tb"
 OUT = ROOT / "sim" / "out"
+
+IMPL_NAMES = {0: "ff", 1: "bram"}   # top_spatial_memory の CAM_IMPL
+IMPLS = (0, 1)
 
 CANDIDATE_BINS = [
     Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "oss-cad-suite" / "bin",
@@ -36,22 +41,24 @@ def find_tool(name):
     return name  # PATH に任せる
 
 
-def run_tb(tb_file, iverilog, vvp):
+def run_tb(tb_file, iverilog, vvp, impl):
     OUT.mkdir(parents=True, exist_ok=True)
-    vvp_file = OUT / (tb_file.stem + ".vvp")
+    tag = f"{tb_file.stem}.{IMPL_NAMES[impl]}"
+    vvp_file = OUT / (tag + ".vvp")
     sources = sorted(RTL.glob("*.v")) + [tb_file]
-    cmd = [iverilog, "-g2005", "-Wall", "-o", str(vvp_file)] + [str(s) for s in sources]
+    cmd = [iverilog, "-g2005", "-Wall", f"-P{tb_file.stem}.CAM_IMPL={impl}",
+           "-o", str(vvp_file)] + [str(s) for s in sources]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout, r.stderr)
-        print(f"[{tb_file.stem}] COMPILE ERROR")
+        print(f"[{tag}] COMPILE ERROR")
         return False
     if r.stderr.strip():
         print(r.stderr.strip())
     r = subprocess.run([vvp, "-n", str(vvp_file)], capture_output=True, text=True)
     print(r.stdout.strip())
     ok = "ALL TESTS PASSED" in r.stdout
-    print(f"[{tb_file.stem}] {'OK' if ok else 'FAILED'}")
+    print(f"[{tag}] {'OK' if ok else 'FAILED'}")
     return ok
 
 
@@ -64,7 +71,7 @@ def main():
     if not tbs:
         print("no testbench matched", file=sys.stderr)
         return 2
-    results = [run_tb(t, iverilog, vvp) for t in tbs]
+    results = [run_tb(t, iverilog, vvp, impl) for t in tbs for impl in IMPLS]
     print(f"{sum(results)}/{len(results)} testbenches passed")
     return 0 if all(results) else 1
 

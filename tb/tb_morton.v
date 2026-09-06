@@ -3,6 +3,7 @@
 // 仕様書 6 章「座標データの登録：Morton コード」。
 `timescale 1ns/1ps
 module tb_morton;
+  parameter CAM_IMPL = 0;   // 0: CAM セル版 / 1: BRAM 版（iverilog -P tb_morton.CAM_IMPL=1）
   localparam BW = 8, EB = 2, DW = 8;
 
   reg           clk = 0, rst_n = 0;
@@ -10,17 +11,17 @@ module tb_morton;
   reg  [BW-1:0] addr = 0;
   reg  [DW-1:0] wdata = 0;
   wire [DW-1:0] rdata;
-  wire          data_valid, hit, not_find, multi_hit, full, full_reject, mask_empty;
+  wire          data_valid, resp_valid, hit, not_find, multi_hit, full, full_reject, busy, mask_empty;
   wire [EB-1:0] hit_index;
   wire [EB:0]   count;
   wire [BW-1:0] mask;
 
-  top_spatial_memory #(.BIT_WIDTH(BW), .ENTRY_BITS(EB), .NUM_ARRAYS(1), .DATA_WIDTH(DW), .SHIFT_STEP(2)) dut (
+  top_spatial_memory #(.BIT_WIDTH(BW), .ENTRY_BITS(EB), .NUM_ARRAYS(1), .DATA_WIDTH(DW), .SHIFT_STEP(2), .CAM_IMPL(CAM_IMPL)) dut (
     .clk(clk), .rst_n(rst_n), .read(read), .write(write), .addr(addr), .wdata(wdata),
     .mask_shift(mask_shift), .mask_reset(mask_reset),
-    .rdata(rdata), .data_valid(data_valid), .hit(hit), .not_find(not_find),
+    .rdata(rdata), .data_valid(data_valid), .resp_valid(resp_valid), .hit(hit), .not_find(not_find),
     .multi_hit(multi_hit), .hit_index(hit_index), .full(full), .full_reject(full_reject),
-    .count(count), .mask(mask), .mask_empty(mask_empty)
+    .busy(busy), .count(count), .mask(mask), .mask_empty(mask_empty)
   );
 
   always #5 clk = ~clk;
@@ -30,6 +31,22 @@ module tb_morton;
     begin
       if (cond) pass = pass + 1;
       else begin fail = fail + 1; $display("FAIL: %0s", msg); end
+    end
+  endtask
+
+  // busy が下がるまで待つ（BRAM 版のリセット後クリアと登録中）
+  task wait_idle;
+    begin #1; while (busy) begin @(negedge clk); #1; end end
+  endtask
+
+  // 要求を出した直後に呼ぶ。resp_valid が立つまで待ち、1 クロックで要求を下げる
+  task wait_resp;
+    begin
+      #1;
+      if (!resp_valid) begin
+        @(negedge clk); read = 0; write = 0; #1;
+        while (!resp_valid) begin @(negedge clk); #1; end
+      end
     end
   endtask
 
@@ -49,12 +66,19 @@ module tb_morton;
   reg [DW-1:0] s_data;
 
   task do_write(input [BW-1:0] a, input [DW-1:0] d);
-    begin @(negedge clk); addr = a; wdata = d; write = 1; @(negedge clk); write = 0; end
+    begin
+      wait_idle;
+      @(negedge clk); addr = a; wdata = d; write = 1;
+      wait_resp;
+      @(negedge clk); write = 0;
+      wait_idle;
+    end
   endtask
   task do_read(input [BW-1:0] a);
     begin
+      wait_idle;
       @(negedge clk); addr = a; read = 1;
-      #1; s_hit = hit; s_idx = hit_index; s_multi = multi_hit;
+      wait_resp; s_hit = hit; s_idx = hit_index; s_multi = multi_hit;
       @(negedge clk); read = 0; s_data = rdata;
     end
   endtask

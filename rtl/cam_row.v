@@ -13,7 +13,8 @@ module cam_row #(
   input  wire                  rst_n,
   input  wire                  we,          // アレイ共通の書き込みイネーブル
   input  wire [ENTRY_BITS-1:0] wr_ptr,      // 書き込み先の行（WR_PTR）
-  input  wire [BIT_WIDTH-1:0]  input_addr,
+  input  wire [BIT_WIDTH-1:0]  wr_addr,     // 記憶するアドレス
+  input  wire [BIT_WIDTH-1:0]  input_addr,  // 検索アドレス
   input  wire [BIT_WIDTH-1:0]  mask,
   output wire                  row_match
 );
@@ -36,6 +37,7 @@ module cam_row #(
         .clk       (clk),
         .rst_n     (rst_n),
         .we        (we_row),
+        .wr_bit    (wr_addr[i]),
         .input_bit (input_addr[i]),
         .mask_bit  (mask[i]),
         .match     (cell_match[i])

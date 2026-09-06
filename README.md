@@ -13,9 +13,11 @@ parallel CAM arrays.
 | 場所 | 内容 |
 |---|---|
 | [SpatialMemory.md](SpatialMemory.md) | 技術仕様書。アーキテクチャ、動作、RTL、ロードマップ |
-| [rtl/](rtl/) | Verilog RTL。`top_spatial_memory.v` がトップ |
+| [rtl/](rtl/) | Verilog RTL。`top_spatial_memory.v` がトップ。CAM は `cam_array`（CAM セル版、ASIC の本設計）と `cam_array_bram`（FPGA 向け）を `CAM_IMPL` で切替 |
 | [tb/](tb/) | 自己判定のテストベンチ（基本動作 / Morton 近傍 / 並列AND） |
-| [sim/run.py](sim/run.py) | Icarus Verilog でテストベンチを回すスクリプト |
+| [sim/run.py](sim/run.py) | Icarus Verilog でテストベンチを回す（CAM セル版と BRAM 版の両方） |
+| [synth/run_synth.py](synth/run_synth.py) | yosys で Xilinx 7 シリーズ向けに合成し、資源量と段数を出す |
+| [docs/history.md](docs/history.md) | 開発の経緯。何を見つけてなぜそう直したか |
 | `spatial_memory_proposal.docx` | 技術企画書（ASIC化の提案） |
 | `spatial_memory_tech_design02.pptx` | 詳細技術設計書（スライド版） |
 
@@ -33,11 +35,16 @@ Icarus Verilog（`iverilog` / `vvp`）が要ります。Windows では
 `%LOCALAPPDATA%\Programs\oss-cad-suite` に展開すると、`sim/run.py` がそこから見つけます。
 
 ```bash
-python sim/run.py            # 全テストベンチ
+python sim/run.py            # 全テストベンチ × 両実装
 python sim/run.py basic      # tb_basic だけ
 ```
 
-各テストベンチは最後に `ALL TESTS PASSED` を出します。
+各テストベンチは最後に `ALL TESTS PASSED` を出します。`CAM_IMPL = 0`（CAM セル版）と `1`（BRAM 版）の両方で回ります。
+
+```bash
+python synth/run_synth.py --config 32x256x2               # CAM セル版の合成見積もり
+python synth/run_synth.py --impl bram --config 32x1024x1  # BRAM 版
+```
 
 | テストベンチ | 確かめること |
 |---|---|

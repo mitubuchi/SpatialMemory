@@ -6,7 +6,8 @@ module cam_cell (
   input  wire clk,
   input  wire rst_n,
   input  wire we,           // 書き込みイネーブル（行選択済み）
-  input  wire input_bit,    // 入力アドレスビット
+  input  wire wr_bit,       // 記憶するビット
+  input  wire input_bit,    // 検索アドレスビット
   input  wire mask_bit,     // マスクビット（0 = スキップ）
   output wire match         // 一致フラグ
 );
@@ -14,7 +15,7 @@ module cam_cell (
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n)    stored_bit <= 1'b0;
-    else if (we)   stored_bit <= input_bit;
+    else if (we)   stored_bit <= wr_bit;
   end
 
   // XNOR: 一致で 1、不一致で 0
