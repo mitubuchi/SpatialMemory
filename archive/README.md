@@ -7,7 +7,9 @@
 | ファイル | 内容 | 作成 |
 |---|---|---|
 | `spatial_memory_proposal.docx` | 技術企画書（ASIC 化の提案） | 2026-04-27 |
-| `spatial_memory_tech_design02.pptx` | 詳細技術設計書（スライド版） | 2026-04-28 |
+| `spatial_memory_proposal.pdf` | 同上の PDF 出力 | 2026-04-28 |
+| `spatial_memory_tech_design.pptx` | 詳細技術設計書（スライド版、初版。473 KB） | 2026-04-28 |
+| `spatial_memory_tech_design02.pptx` | 詳細技術設計書（スライド版、改訂版。本文は初版とほぼ同じ） | 2026-04-28 |
 
 ## 現在の仕様書と食い違っている点
 

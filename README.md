@@ -19,7 +19,7 @@ parallel CAM arrays.
 | [synth/run_synth.py](synth/run_synth.py) | yosys で Xilinx 7 シリーズ向けに合成し、資源量と段数を出す |
 | [docs/history.md](docs/history.md) | 開発の経緯。何を見つけてなぜそう直したか |
 | [docs/hardware-options.md](docs/hardware-options.md) | 実機実験の選択肢。評価ボードの候補と予算、何が載るか |
-| [archive/](archive/) | 2026 年 4 月の企画書（docx）とスライド（pptx）。**現在の仕様とは一致しない。** 記録として残すだけ |
+| [archive/](archive/) | 2026 年 4 月の企画書（docx / pdf）とスライド（pptx × 2）。**現在の仕様とは一致しない。** 記録として残すだけ |
 
 ## 3つの核心機構 / Three Core Mechanisms
 
