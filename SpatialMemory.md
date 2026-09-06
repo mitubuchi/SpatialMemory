@@ -134,8 +134,8 @@ row_match    =  AND(masked_match[0..N-1])    // 全ビットANDで行一致判�
 4. 全有効ビットのANDを取り row_match を生成（1クロック）
    AND all active bits → row_match generated in 1 clock cycle
 
-5. row_match が立っている行のインデックスが hit_index
-   The row index where row_match=1 becomes hit_index
+5. row_match が立っている行のインデックスが hit_index（複数立てば最小インデックス。6章「多重ヒットの規則」）
+   The row index where row_match=1 becomes hit_index (lowest index wins on multiple hits; see §6)
 ```
 
 ### 書き込みカウンター / Write Pointer
@@ -232,7 +232,7 @@ ANDは「アレイごとのHITフラグ」ではなく、**行ごとのマッチ
 ```
 row_hit[i] = match[0][i] AND match[1][i] AND ... AND match[N-1][i]   // i = 0 .. NUM_ENTRIES-1
 HIT        = OR(row_hit[0 .. NUM_ENTRIES-1])                        // 1行でも残ればHIT
-hit_index  = row_hit が立っている行                                  // データメモリーのアドレス
+hit_index  = PriorityEncode(row_hit)                                // 複数立てば最小インデックス（6章）
 ```
 
 > ⚠️ フラグ同士の AND（`match_flag[0] AND match_flag[1] AND ...`）にしてはいけません。  
@@ -287,9 +287,13 @@ LOOP:
   IF mask == 0x0000...0000:
     RETURN null, NotFind            // 全ビット無視しても見つからず終了
 
-  mask ← mask << 1                 // LSBを0にシフト（1ビット分範囲拡大）
+  mask ← mask << D                 // LSB を D ビット 0 にする（D = 次元数。スカラーなら 1）
   GOTO LOOP
 ```
+
+`D` は 1 ステップで剥がすビット数です。アドレスが単なる数値なら `D = 1`、
+後述の Morton コードで D 次元の座標を詰めている場合は `D` にすると、
+1 ステップで全軸が同時に 1 段粗くなります。
 
 ### 検索範囲の拡大 / Search Range Expansion
 
@@ -304,12 +308,105 @@ LOOP:
 
 ### 特長 / Key Properties
 
-- **最小ビット差のエントリを優先して発見** できます（完全一致から段階的に範囲を広げるため）。  
-  Finds the entry with the **smallest bit-difference first** (expands range step by step from exact match).
+- **共有プレフィックスが最も長いエントリを優先して発見** します（完全一致から段階的に範囲を広げるため）。  
+  Finds the entry sharing the **longest address prefix** first (expands range step by step from exact match).
 - 1ステップあたり **1クロック** でCAM検索が完了します。  
   Each step completes **in 1 clock cycle**.
 - マスクのシフト量 = **検索精度と速度のトレードオフ** を実装側で制御できます。  
   The shift amount = implementation-controlled **tradeoff between precision and speed**.
+
+### 近傍の意味 / What "Neighbor" Means
+
+LSB マスクで広がるのは **上位ビットを共有する範囲（プレフィックス近傍）** です。
+ハミング距離（異なるビットの個数）の近さではありません。
+
+```
+検索アドレス : 0101 1010
+エントリ A   : 0101 1011   ← 下位 1 bit だけ違う   → ステップ 1 で見つかる
+エントリ B   : 1101 1010   ← 上位 1 bit だけ違う   → マスクが全 0 になるまで見つからない
+```
+
+A と B はどちらもハミング距離 1 ですが、見つかる順は大きく違います。
+アドレスを数値と見れば、ステップ K で当たるのは **`2^K` 刻みのブロックで同じ区画に入るエントリ**
+であり、これは 1 次元なら数直線上の区間、多次元なら四分木・八分木のセルにあたります。
+「近傍」をこの意味で使うことを前提に設計します。
+
+> The mask expands a **shared-prefix neighborhood**, not a Hamming-distance one. At step K the
+> hit set is "entries in the same `2^K`-aligned block" — an interval on a number line, or a
+> quadtree/octree cell in multiple dimensions.
+
+### 座標データの登録：Morton コード / Morton (Z-order) Encoding
+
+D 次元の座標を扱うときは、各軸のビットを**交互に並べた Morton コード（Z オーダー）**を
+アドレスとして記憶します。こうすると LSB を D ビット剥がすごとに、全軸が同時に 1 段粗い
+セルに広がります。
+
+```
+2 次元、各軸 4 bit の例 / 2-D, 4 bits per axis
+  x = x3 x2 x1 x0
+  y = y3 y2 y1 y0
+  addr = y3 x3 y2 x2 y1 x1 y0 x0        // MSB 側から (y,x) を交互に
+
+ステップ 0: mask = 1111 1111  → 1×1 のセル（完全一致）
+ステップ 1: mask = 1111 1100  → 2×2 のセル（x0,y0 を無視）
+ステップ 2: mask = 1111 0000  → 4×4 のセル
+ステップ 3: mask = 1100 0000  → 8×8 のセル
+```
+
+- 1 ステップ = `mask << D`（`mask_register` の `SHIFT_STEP` パラメーター）
+- 軸ごとに別の CAM アレイを持たせる並列構成（5章・7章）とも両立します。
+  その場合は各アレイが独立のマスクを持ち、軸ごとに広げ方を変えられます。
+- 3 次元なら `z y x` を交互に並べ、`D = 3`。
+
+> Interleave the axis bits (Morton / Z-order) before storing. Each shift of D bits then
+> coarsens the cell in every axis at once: 1×1 → 2×2 → 4×4 → …
+
+### 境界問題と対処 / Boundary Problem
+
+プレフィックス近傍には、四分木と同じ **境界問題** があります。
+
+```
+検索アドレス : 0111
+エントリ C   : 1000   ← 数値としては隣（差 1）だが、上位ビットが全部違う
+```
+
+C はマスクを全部剥がすまで見つかりません。セルの境界をまたぐ相手は、
+どれだけ近くても同じセルには入らないためです。対処は 2 通りあります。
+
+| 方式 | やること | 利点 | 代償 |
+|---|---|---|---|
+| **A. 検索側をずらす（既定）** | ステップ K で `addr` に加えて、各軸の座標を `± 2^K` ずらして再エンコードしたアドレス（スカラーなら `addr ± 2^K`）を同じマスクで検索する | データを重複させない。登録は変えなくてよい | 検索回数が増える。D 次元で全隣接セルを見るなら `3^D` 回（2D: 9 回、3D: 27 回）。面で接するセルだけなら `2D + 1` 回 |
+| **B. 登録側を重ねる** | セルの境界ぎわのエントリを隣のセルにも登録する | 検索は 1 回で済む | エントリを消費する。上書き（Write + HIT）が複数行に及ぶ |
+
+既定は **A** とします。ハードウェアではずらしたアドレスの検索を並列に走らせる
+（CAM を複数本持つ、または 1 本を `2D + 1` クロック回す）ことで、追加コストを
+サイクル数かアレイ数のどちらかに寄せられます。B はエントリ数に余裕があり、
+かつ更新が少ないデータ向けです。
+
+> Prefix neighborhoods split at cell boundaries (`0111` vs `1000`). Default mitigation:
+> at step K also query `addr ± 2^K` per axis (face neighbors: `2D + 1` queries; all
+> neighbors: `3^D`). Alternative: register boundary entries in adjacent cells too.
+
+### 多重ヒットの規則 / Multi-Hit Rule
+
+マスクを広げると **複数行が同時に一致する** のが普通です（範囲 `2^K` の中に何件も
+入るため）。同じセルの中では、CAM はそれ以上の遠近を区別できません。
+どれを `hit_index` にするかは次のとおり決めます。
+
+1. **最小インデックスを採る**（プライオリティエンコーダー）。WR_PTR は昇順に採番するので、
+   これは**最も古いエントリ**にあたります。決定的で、回路も最も単純です。
+2. `multi_hit` フラグを同時に出す。複数あったことを上位ロジックが知れるようにする。
+3. 「最も新しいエントリ」を優先したい場合は、エンコーダーの走査方向を逆にする
+   （最大インデックス）。設計パラメーターで切り替えます。
+
+セル内の遠近まで欲しい場合は、`multi_hit` を見た上位ロジックがマスクを 1 段戻して
+再検索する（範囲を狭める）か、ヒットした行のアドレスを読み戻して距離を計算します。
+これは CAM の外の仕事です。
+
+> Multiple rows will match once the mask widens. `hit_index` is the **lowest matching index**
+> (oldest entry, via a priority encoder), with a `multi_hit` flag so the caller knows there
+> were more. Highest-index-wins is a parameter option. Ranking within a cell is done outside
+> the CAM.
 
 ---
 
@@ -368,8 +465,10 @@ SRAM Block #0 ──→ SRAM Block #1 ──→ SRAM Block #2
 ソフトウェア実装では O(N) かかる処理が O(1) になります。
 
 #### ② 近傍検索のハードウェア高速化
-LSBマスクシフトにより、**ビット差が最小のエントリから順に**発見できます。  
-近似最近傍探索（ANN: Approximate Nearest Neighbor）をハードウェアで直接実行できるため、ソフトウェアベースのKD木・LSHと比べて大幅に低レイテンシです。
+LSBマスクシフトにより、**共有プレフィックスが最も長いエントリから順に**発見できます。  
+Morton コードで座標を詰めておけば、四分木・八分木の「同じセルに入る点を探す」処理を
+1 セル 1 クロックでこなせます。ソフトウェアでツリーを辿る場合と違い、セルの中の
+エントリ数に検索時間が依存しません（6章「近傍の意味」「境界問題」を参照）。
 
 #### ③ 多次元連想検索
 並列CAMアレイのAND条件により、複数の特徴量を**同時にマッチング**できます。  
@@ -397,6 +496,7 @@ top_spatial_memory.v              ← トップレベル統合
 │       └── cam_cell.v            ← 1ビット比較器（XNOR + マスクOR）
 ├── mask_register.v               ← LSBシフトマスクレジスタ
 ├── and_reduction_tree.v          ← 行ごとの全次元AND（行マッチベクトルのAND）
+├── priority_encoder.v            ← row_hit → hit_index（多重ヒット時は最小インデックス）
 ├── wr_pointer.v                  ← 書き込みカウンター（WR_PTR）
 ├── output_ctrl.v                 ← 出力制御ロジック（HIT/NotFind判定）
 └── data_sram_wrapper.v           ← SRAMマクロ ラッパー（直列接続対応）
@@ -514,11 +614,47 @@ module and_reduction_tree #(
 endmodule
 ```
 
+### プライオリティエンコーダー / Priority Encoder
+
+`row_hit` から `hit_index` を作ります。複数行が立っているときは **最小インデックス**
+（最も古いエントリ）を採り、`multi_hit` を立てます（6章「多重ヒットの規則」）。
+
+```verilog
+module priority_encoder #(
+  parameter NUM_ENTRIES = 256,
+  parameter ENTRY_BITS  = 8,
+  parameter NEWEST_WINS = 0     // 1 にすると最大インデックス（最も新しいエントリ）を採る
+)(
+  input  wire [NUM_ENTRIES-1:0] row_hit,
+  output reg  [ENTRY_BITS-1:0]  hit_index,
+  output wire                   multi_hit    // 2 行以上一致
+);
+  integer i;
+  always @* begin
+    hit_index = {ENTRY_BITS{1'b0}};
+    if (NEWEST_WINS) begin
+      for (i = 0; i < NUM_ENTRIES; i = i+1)        // 上から上書きして最大インデックスが残る
+        if (row_hit[i]) hit_index = i[ENTRY_BITS-1:0];
+    end else begin
+      for (i = NUM_ENTRIES-1; i >= 0; i = i-1)     // 下から上書きして最小インデックスが残る
+        if (row_hit[i]) hit_index = i[ENTRY_BITS-1:0];
+    end
+  end
+
+  // 最下位の 1 を消して、まだ 1 が残っていれば多重ヒット
+  assign multi_hit = |(row_hit & (row_hit - 1'b1));
+endmodule
+```
+
+上のループ記述は動作定義用です。エントリ数が大きいときは、合成時にツリー構造の
+エンコーダー（log2 段）へ置き換えて遅延を抑えます。
+
 ### マスクレジスタ / Mask Register
 
 ```verilog
 module mask_register #(
-  parameter BIT_WIDTH = 32
+  parameter BIT_WIDTH  = 32,
+  parameter SHIFT_STEP = 1     // 1 ステップで剥がすビット数（Morton コードなら次元数 D）
 )(
   input  wire                  clk,
   input  wire                  rst_n,
@@ -530,7 +666,7 @@ module mask_register #(
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n)          mask <= {BIT_WIDTH{1'b1}};
     else if (reset_mask) mask <= {BIT_WIDTH{1'b1}};
-    else if (shift_en)   mask <= mask << 1;  // LSBを0にシフト
+    else if (shift_en)   mask <= mask << SHIFT_STEP;  // LSB を SHIFT_STEP ビット 0 にする
   end
 
   assign mask_empty = (mask == {BIT_WIDTH{1'b0}});
@@ -655,7 +791,9 @@ SpatialMemory.sln
 │   ├── CamCell.cs            1ビット比較器
 │   ├── CamRow.cs             1行分のCAMセル群
 │   ├── CamArray.cs           N行×Mビット CAMアレイ
-│   ├── MaskRegister.cs       LSBシフトマスク管理
+│   ├── MaskRegister.cs       LSBシフトマスク管理（シフト量 D）
+│   ├── MortonCode.cs         座標 ⇄ Morton コード変換（2D / 3D）
+│   ├── PriorityEncoder.cs    row_hit → hit_index（最小インデックス）
 │   ├── WrPointer.cs          書き込みポインター
 │   ├── DataMemory.cs         データRAM + RW制御
 │   └── SpatialMemory.cs      トップレベル統合クラス
@@ -683,7 +821,8 @@ public class SpatialMemory<TData>
     // Write: アドレスが存在すれば上書き、なければ新規登録
     public void Write(ulong address, TData data);
 
-    // 近傍検索: LSBシフトしながら最近傍エントリを探す
+    // 近傍検索: LSBシフトしながら、共有プレフィックスが最も長いエントリを探す
+    // （プレフィックス近傍。境界問題の対処 A を含む。6章を参照）
     public SearchResult<TData> SearchNearest(ulong address, int maxShift);
 
     // プロパティ
@@ -696,7 +835,8 @@ public record SearchResult<TData>(
     bool Hit,
     TData? Data,
     int HitIndex,
-    int MaskShifts   // 何回シフトで見つかったか（ビット差の目安）
+    int MaskShifts,  // 何回シフトで見つかったか（＝プレフィックスを何ビット削ったか）
+    bool MultiHit    // 同じマスクで複数行が一致した（hit_index は最小インデックス）
 );
 ```
 
