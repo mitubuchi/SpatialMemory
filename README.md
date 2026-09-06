@@ -13,8 +13,8 @@ parallel CAM arrays.
 | 場所 | 内容 |
 |---|---|
 | [SpatialMemory.md](SpatialMemory.md) | 技術仕様書。アーキテクチャ、動作、RTL、ロードマップ |
-| [rtl/](rtl/) | Verilog RTL。`top_spatial_memory.v` がトップ。CAM は `cam_array`（CAM セル版、ASIC の本設計）と `cam_array_bram`（FPGA 向け）を `CAM_IMPL` で切替 |
-| [tb/](tb/) | 自己判定のテストベンチ（基本動作 / Morton 近傍 / 並列AND） |
+| [rtl/](rtl/) | Verilog RTL。`top_spatial_memory.v` がトップ。CAM は `cam_array`（CAM セル版、ASIC の本設計）と `cam_array_bram`（FPGA 向け）を `CAM_IMPL` で切替。`search_sequencer.v` が近傍検索（境界対処 A）を回す |
+| [tb/](tb/) | 自己判定のテストベンチ（基本動作 / Morton 近傍 / 並列AND / 近傍検索シーケンサー） |
 | [sim/run.py](sim/run.py) | Icarus Verilog でテストベンチを回す（CAM セル版と BRAM 版の両方） |
 | [synth/run_synth.py](synth/run_synth.py) | yosys で Xilinx 7 シリーズ向けに合成し、資源量と段数を出す |
 | [docs/history.md](docs/history.md) | 開発の経緯。何を見つけてなぜそう直したか |
@@ -51,6 +51,7 @@ python synth/run_synth.py --impl bram --config 32x1024x1  # BRAM 版
 | `tb_basic` | valid ビット、登録・読み出し・上書き、マスクシフト近傍検索と多重ヒット規則、Write 時の完全一致固定、FULL の拒否と上書き |
 | `tb_morton` | 2 次元 Morton コードで 1×1 → 2×2 → 4×4 → 8×8 とセルが広がること、境界問題 |
 | `tb_parallel` | 並列 CAM の AND が「行ごと」であること（アレイ単位のフラグ AND では通らない入力） |
+| `tb_sequencer` | 近傍検索シーケンサー。`0111`/`1000` が段 0 の隣で出会うこと、面 / 全隣接の差、k_max の打ち切り、空間の端の飛ばし |
 
 ## 状態 / Status
 

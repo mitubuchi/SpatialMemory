@@ -22,7 +22,7 @@ module tb_basic;
 
   top_spatial_memory #(.BIT_WIDTH(BW), .ENTRY_BITS(EB), .NUM_ARRAYS(1), .DATA_WIDTH(DW), .CAM_IMPL(CAM_IMPL)) dut (
     .clk(clk), .rst_n(rst_n), .read(read), .write(write), .addr(addr), .wdata(wdata),
-    .mask_shift(mask_shift), .mask_reset(mask_reset),
+    .mask_shift(mask_shift), .mask_reset(mask_reset), .mask_ovr_en(1'b0), .mask_ovr({BW{1'b0}}),
     .rdata(rdata), .data_valid(data_valid), .resp_valid(resp_valid), .hit(hit), .not_find(not_find),
     .multi_hit(multi_hit), .hit_index(hit_index), .full(full), .full_reject(full_reject),
     .busy(busy), .count(count), .mask(mask), .mask_empty(mask_empty)

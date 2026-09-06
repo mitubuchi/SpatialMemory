@@ -4,7 +4,8 @@
 //   addr   : NUM_ARRAYS 本のアドレスを連結したもの（アレイ a = addr[a*BIT_WIDTH +: BIT_WIDTH]）
 //   read / write : 1 クロックのパルス。resp_valid が立ったクロックで hit / hit_index /
 //            multi_hit / full_reject が有効。rdata と data_valid はその次のクロック
-//   mask_shift / mask_reset : 近傍検索のマスク操作（6 章）
+//   mask_shift / mask_reset : 近傍検索のマスク操作（6 章）。ホストが直接回す場合
+//   mask_ovr_en / mask_ovr  : search_sequencer が段から作ったマスクを差し込む場合
 //   busy   : CAM が登録中（BRAM 版のみ）。busy 中の read / write は受け付けない
 //
 // CAM_IMPL = 0 : cam_array（CAM セル版、ASIC の本設計）。検索は組み合わせ、resp_valid は同じクロック
@@ -29,6 +30,8 @@ module top_spatial_memory #(
   input  wire [DATA_WIDTH-1:0]           wdata,
   input  wire                            mask_shift,
   input  wire                            mask_reset,
+  input  wire                            mask_ovr_en,  // 1 のとき mask_ovr を使う（search_sequencer 用）
+  input  wire [BIT_WIDTH-1:0]            mask_ovr,
   output wire [DATA_WIDTH-1:0]           rdata,
   output reg                             data_valid,   // rdata が有効（Read + HIT の resp_valid の翌クロック）
   output wire                            resp_valid,   // hit 系の出力が有効
@@ -53,8 +56,8 @@ module top_spatial_memory #(
     .mask(mask), .mask_empty(mask_empty)
   );
 
-  // Write は常に完全一致
-  wire [BIT_WIDTH-1:0] mask_eff = write ? {BIT_WIDTH{1'b1}} : mask;
+  // Write は常に完全一致。それ以外は、シーケンサーが握っていればその値、でなければマスクレジスタ
+  wire [BIT_WIDTH-1:0] mask_eff = write ? {BIT_WIDTH{1'b1}} : (mask_ovr_en ? mask_ovr : mask);
 
   // ---- 要求のパイプライン（CAM の遅延に合わせる） ---------------------------------
   wire                            read_d, write_d;

@@ -424,6 +424,54 @@ C はマスクを全部剥がすまで見つかりません。セルの境界を
 > at step K also query `addr ± 2^K` per axis (face neighbors: `2D + 1` queries; all
 > neighbors: `3^D`). Alternative: register boundary entries in adjacent cells too.
 
+### 検索シーケンサー / Search Sequencer
+
+方式 A を回すのは `rtl/search_sequencer.v` です。ホストから `start` / `addr` / `k_max` / `mode` を
+受け、段 K = 0 … k_max について **中心セル → 面隣接セル → 角のセル** の順に検索を出し、
+最初に当たったところで止まります。マスクは段から直接作ります（全 1 << K·D）。
+
+```
+start(addr, k_max, mode)
+  for K = 0 .. k_max:
+    mask = 全1 << (K·D)
+    query(中心)                     hit → found(level=K, cell=中心)
+    for 面隣接セル（mode >= 1）:     hit → found(level=K, cell=そのセル)
+    for 角のセル（mode == 2）:        hit → found(level=K, cell=そのセル)
+  not_found
+```
+
+| mode | 引くセル | 1 段あたり（2D / 3D） |
+|---|---|---|
+| 0 | 中心だけ（境界対処なし） | 1 / 1 |
+| 1 | 面隣接まで | 5 / 7 |
+| 2 | 全隣接 | 9 / 27 |
+
+**隣のセルは Morton コードのまま作る** — 軸 a のビットだけに桁上げを通すので、デコードも再エンコードも要りません。
+
+```
+p = K·D + a                                       // 軸 a の段 K のビット位置
+x_plus  = (((m | ~AX) + (1 << p)) & AX) | (m & ~AX)   // 他の軸のビットを 1 で埋めて桁上げを素通し
+x_minus = (((m &  AX) - (1 << p)) & AX) | (m & ~AX)
+```
+
+空間の端で桁あふれしたセルは存在しないので、その問い合わせは飛ばします。
+
+**同じ段の中では中心 → 面 → 角の順で引き、最初に当たったものを採る** のが「近いセルを優先する」の
+実装です。CAM の多重ヒット規則（最小インデックス）はセルの中だけに効きます。
+
+**保証:** 段 K−1 で何も無ければ、チェビシェフ距離 2^(K−1) 以内に点はありません（中心 + 隣接で、
+クエリから各軸 2^(K−1) 以上の窓を覆っているため）。段 K で見つかった点は距離 2^(K+1) 以内。
+つまり **真の最近傍の高々 4 倍** の距離で止まります。
+
+問い合わせは 1 件ずつ（`resp_valid` を待つ）なので、CAM セル版でも BRAM 版でも同じシーケンサーが
+使えます。BRAM 版で毎クロック流し込む投機発行は、まだ入れていません。
+
+> The sequencer walks levels K = 0..k_max, querying the centre cell, then face neighbours, then
+> corners, and stops at the first hit. Neighbour cells are formed directly in Morton space by
+> carrying through one axis's bits only. If nothing is found at level K−1, no point lies within
+> Chebyshev distance 2^(K−1); a point found at level K is within 2^(K+1) — at most 4× the true
+> nearest distance.
+
 ### 多重ヒットの規則 / Multi-Hit Rule
 
 マスクを広げると **複数行が同時に一致する** のが普通です（範囲 `2^K` の中に何件も
@@ -534,6 +582,7 @@ top_spatial_memory.v              ← トップレベル統合
 ├── mask_register.v               ← LSBシフトマスクレジスタ
 ├── and_reduction_tree.v          ← 行ごとの全次元AND（行マッチベクトルのAND）
 ├── priority_encoder.v            ← row_hit → hit_index（多重ヒット時は最小インデックス）
+├── search_sequencer.v            ← 近傍検索シーケンサー（境界対処 A。トップの外側に付ける）
 ├── wr_pointer.v                  ← 書き込みカウンター（WR_PTR）
 ├── output_ctrl.v                 ← 出力制御ロジック（HIT/NotFind判定）
 └── data_sram_wrapper.v           ← SRAMマクロ ラッパー（直列接続対応）
